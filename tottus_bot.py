@@ -9,18 +9,19 @@ from playwright.sync_api import sync_playwright
 # ------------------ CONFIGURACIÓN ------------------
 
 # % de descuento mínimo que quieres detectar
-DESCUENTO_MINIMO = 80
+DESCUENTO_MINIMO = 40
 
-# URLs de Tottus a revisar cada vez que corre el bot.
-# Puedes agregar/quitar categorías o búsquedas según lo que te interese.
-# Cómo conseguir más URLs: entra a https://tottus.falabella.com.pe,
-# navega a una categoría o usa el buscador, y copia la URL resultante.
+# Categorías de Tottus a revisar cada vez que corre el bot (sin el número de página).
+# El bot recorre automáticamente todas las páginas de cada una (ver PAGINAS_MAX abajo).
+# Cómo conseguir más URLs: entra a https://www.tottus.com.pe, navega a una
+# categoría, y copia la URL resultante (sin ningún "?page=" al final).
 URLS = [
-    "https://tottus.falabella.com.pe/tottus-pe/search?Ntt=ofertas",
-    "https://tottus.falabella.com.pe/tottus-pe/category/cat40057/Despensa",
-    "https://tottus.falabella.com.pe/tottus-pe/category/cat70103/Bebidas",
-    "https://tottus.falabella.com.pe/tottus-pe/category/cat3170117/Electro",
+    "https://www.tottus.com.pe/tottus-pe/lista/CATG48292/Tecnologia",
+    "https://www.tottus.com.pe/tottus-pe/lista/CATG48293/Electrohogar",
 ]
+
+# Máximo de páginas a revisar por categoría (por si la paginación no se detiene sola)
+PAGINAS_MAX = 30
 
 SEEN_FILE = Path("seen.json")
 
@@ -106,7 +107,7 @@ def extraer_productos(page):
             nombre = nombre_el.inner_text().strip() if nombre_el else "Producto sin nombre"
             link = link_el.get_attribute("href") if link_el else ""
             if link and link.startswith("/"):
-                link = "https://tottus.falabella.com.pe" + link
+                link = "https://www.tottus.com.pe" + link
 
             precio_normal = limpiar_precio(precio_normal_el.inner_text()) if precio_normal_el else None
             precio_oferta = limpiar_precio(precio_oferta_el.inner_text()) if precio_oferta_el else None
@@ -142,30 +143,49 @@ def revisar_tottus():
             )
         )
 
-        for url in URLS:
-            print(f"Revisando: {url}")
-            try:
-                page.goto(url, timeout=45000, wait_until="domcontentloaded")
-                page.wait_for_timeout(4000)  # deja que cargue el JS/productos
+        for base_url in URLS:
+            separador = "&" if "?" in base_url else "?"
+            pagina = 1
+            nombres_vistos_en_categoria = set()
 
-                # Scroll para forzar carga de productos (lazy loading)
-                for _ in range(4):
-                    page.mouse.wheel(0, 2000)
-                    page.wait_for_timeout(1000)
+            while pagina <= PAGINAS_MAX:
+                # Página 1 es la URL tal cual; desde la 2 se agrega ?page=N
+                url = base_url if pagina == 1 else f"{base_url}{separador}page={pagina}"
+                print(f"Revisando: {url}")
 
-                productos = extraer_productos(page)
-                print(f"  -> {len(productos)} productos con descuento detectados")
+                try:
+                    page.goto(url, timeout=45000, wait_until="domcontentloaded")
+                    page.wait_for_timeout(4000)  # deja que cargue el JS/productos
 
-                for prod in productos:
-                    if prod["descuento"] >= DESCUENTO_MINIMO:
-                        clave = f"{prod['nombre']}|{prod['precio_oferta']}"
-                        if clave not in vistos:
-                            encontrados.append(prod)
-                            vistos.add(clave)
+                    # Scroll para forzar carga de productos (lazy loading)
+                    for _ in range(4):
+                        page.mouse.wheel(0, 2000)
+                        page.wait_for_timeout(1000)
 
-            except Exception as e:
-                print(f"Error revisando {url}: {e}")
-                continue
+                    productos = extraer_productos(page)
+                    print(f"  -> {len(productos)} productos con descuento detectados")
+
+                    # Si la página no trajo productos nuevos, asumimos que ya
+                    # no hay más páginas (se repitió el contenido o llegó al final)
+                    nombres_pagina = {p["nombre"] for p in productos}
+                    if not productos or nombres_pagina.issubset(nombres_vistos_en_categoria):
+                        print("  -> Sin productos nuevos, se asume fin de la paginación.")
+                        break
+
+                    nombres_vistos_en_categoria |= nombres_pagina
+
+                    for prod in productos:
+                        if prod["descuento"] >= DESCUENTO_MINIMO:
+                            clave = f"{prod['nombre']}|{prod['precio_oferta']}"
+                            if clave not in vistos:
+                                encontrados.append(prod)
+                                vistos.add(clave)
+
+                    pagina += 1
+
+                except Exception as e:
+                    print(f"Error revisando {url}: {e}")
+                    break
 
         browser.close()
 
