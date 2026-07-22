@@ -1,15 +1,12 @@
-name: Tottus Ofertas Bot
-
 on:
-push:
-brandches:
-- master 
-  schedule:
-    # Corre cada 15 minutos. GitHub puede retrasar un poco la ejecución
-    # en horas de mucha carga, pero en la práctica corre casi siempre a tiempo.
-    - cron: "*/15 * * * *"
-  workflow_dispatch: {}  # te permite ejecutarlo manualmente desde la pestaña Actions
+  push:
+    branches:
+      - master
 
+  schedule:
+    - cron: "*/15 * * * *"
+
+  workflow_dispatch:
 permissions:
   contents: write
 
