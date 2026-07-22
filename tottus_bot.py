@@ -9,7 +9,7 @@ from playwright.sync_api import sync_playwright
 # ------------------ CONFIGURACIÓN ------------------
 
 # % de descuento mínimo que quieres detectar
-DESCUENTO_MINIMO = 70
+DESCUENTO_MINIMO = 50
 
 # Máximo de páginas a revisar por categoría (por si la paginación no se detiene sola)
 PAGINAS_MAX = 30
@@ -151,29 +151,75 @@ def ir_a_siguiente_pagina(page):
     return False
 
 
+def obtener_bloques_producto(page):
+    """
+    Devuelve una lista de {href, texto} para cada posible producto de la página.
+
+    En algunos sitios (Tottus, Falabella) el precio está dentro del mismo <a>
+    que envuelve el producto. En otros, el precio puede estar en un elemento
+    "hermano" fuera del <a> (ej: el link solo envuelve la imagen/nombre).
+    Para cubrir ambos casos: para cada <a href>, si su propio texto no trae
+    "S/", se sube hasta 3 niveles en el HTML buscando un contenedor que sí
+    tenga el precio (probablemente la tarjeta completa del producto).
+    """
+    return page.evaluate(
+        """
+        () => {
+            const resultados = [];
+            const vistos = new Set();
+            const anchors = Array.from(document.querySelectorAll('a[href]'));
+            for (const a of anchors) {
+                if (!a.href || vistos.has(a.href)) continue;
+                let contenedor = a;
+                let texto = a.innerText || '';
+                let nivel = 0;
+                while (nivel < 3 && !texto.includes('S/')) {
+                    if (!contenedor.parentElement) break;
+                    contenedor = contenedor.parentElement;
+                    texto = contenedor.innerText || '';
+                    nivel++;
+                }
+                if (!texto.includes('S/')) continue;
+                vistos.add(a.href);
+                resultados.push({href: a.getAttribute('href'), texto: texto});
+            }
+            return resultados;
+        }
+        """
+    )
+
+
 def extraer_productos(page, dominio_base):
     """
     Extrae productos de la página actual, sin depender de clases CSS específicas
-    (cada tienda usa las suyas y cambian con el tiempo). Busca todos los <a> con
-    precio ("S/ ...") y de ahí saca:
-      - todos los precios "S/ ..." que aparecen en el bloque (el más bajo = precio
-        de oferta, el más alto = precio de referencia/"antes")
+    (cada tienda usa las suyas y cambian con el tiempo). Para cada bloque
+    (ver obtener_bloques_producto) saca:
+      - todos los precios "S/ ..." que aparecen (ignorando cuotas/mensualidades,
+        que no son el precio real del producto)
       - el % de descuento: si la tienda ya lo muestra (ej: "-22%") se usa ese
         (el más alto, si hay varios niveles como en Ripley); si no lo muestra,
         se calcula a partir de los dos precios (ej: Coolbox)
     """
     productos = []
-    vistos_href = set()
-    enlaces = page.query_selector_all("a")
+    vistos_nombre_precio = set()
+    bloques = obtener_bloques_producto(page)
 
-    for a in enlaces:
+    for bloque in bloques:
         try:
-            href = a.get_attribute("href")
-            if not href or href in vistos_href:
+            href = bloque.get("href")
+            texto_original = bloque.get("texto") or ""
+            if not href or not texto_original or "S/" not in texto_original:
                 continue
 
-            texto = a.inner_text()
-            if not texto or "S/" not in texto:
+            # Quita líneas de cuotas/mensualidades: no son el precio real
+            # (ej: "Desde S/ 232.83 al mes o en 3 cuotas sin intereses")
+            lineas_texto = texto_original.split("\n")
+            lineas_texto = [
+                l for l in lineas_texto
+                if not re.search(r"cuota|al mes|/mes|mensual", l, re.IGNORECASE)
+            ]
+            texto = "\n".join(lineas_texto)
+            if "S/" not in texto:
                 continue
 
             precios_texto = re.findall(r"S/\.?\s*([\d,]+(?:\.\d+)?)", texto)
@@ -205,7 +251,7 @@ def extraer_productos(page, dominio_base):
                 continue
 
             # El nombre es el texto antes de que empiece la info de precio/envío
-            lineas = [l.strip() for l in texto.split("\n") if l.strip()]
+            lineas = [l.strip() for l in lineas_texto if l.strip()]
             nombre_partes = []
             for l in lineas:
                 if (
@@ -222,11 +268,17 @@ def extraer_productos(page, dominio_base):
                 nombre_partes.append(l)
             nombre = " ".join(nombre_partes)[:150] if nombre_partes else "Producto sin nombre"
 
+            # Evita duplicados cuando dos enlaces distintos (ej: imagen y título)
+            # suben al mismo contenedor y generan el mismo producto dos veces
+            clave = f"{nombre}|{precio_oferta}|{precio_normal}"
+            if clave in vistos_nombre_precio:
+                continue
+            vistos_nombre_precio.add(clave)
+
             link = href
             if link.startswith("/"):
                 link = dominio_base + link
 
-            vistos_href.add(href)
             productos.append(
                 {
                     "nombre": nombre,
@@ -237,7 +289,7 @@ def extraer_productos(page, dominio_base):
                 }
             )
         except Exception as e:
-            print(f"Error procesando un enlace: {e}")
+            print(f"Error procesando un bloque: {e}")
             continue
 
     return productos
