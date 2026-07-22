@@ -473,6 +473,9 @@ def main():
     vistos = cargar_vistos()
     ofertas_nuevas = []
     for oferta in ofertas:
+        link = (oferta.get("link") or "").strip()
+        if not link or link in ("#", "javascript:void(0)") or not link.startswith("http"):
+            continue
         clave = clave_oferta(oferta)
         if clave not in vistos:
             ofertas_nuevas.append(oferta)
