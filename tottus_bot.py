@@ -1,6 +1,7 @@
 import html
 import os
 import re
+from urllib.parse import urlparse
 
 import requests
 from playwright.sync_api import sync_playwright
@@ -10,21 +11,86 @@ from playwright.sync_api import sync_playwright
 # % de descuento mínimo que quieres detectar
 DESCUENTO_MINIMO = 70
 
-# Categorías de Tottus a revisar cada vez que corre el bot (sin el número de página).
-# El bot recorre automáticamente todas las páginas de cada una (ver PAGINAS_MAX abajo).
-# Cómo conseguir más URLs: entra a https://www.tottus.com.pe, navega a una
-# categoría, y copia la URL resultante (sin ningún "?page=" al final).
-URLS = [
-    "https://www.tottus.com.pe/tottus-pe/lista/CATG48292/Tecnologia",
-    "https://www.tottus.com.pe/tottus-pe/lista/CATG48293/Electrohogar",
-    "https://www.tottus.com.pe/tottus-pe/lista/CATG48294/Dormitorio",
-    "https://www.tottus.com.pe/tottus-pe/lista/CATG48296/Muebles",
-    "https://www.tottus.com.pe/tottus-pe/lista/CATG48297/Jugueteria",
-    "https://www.tottus.com.pe/tottus-pe/lista/CATG48299/Bazar",
-]
-
 # Máximo de páginas a revisar por categoría (por si la paginación no se detiene sola)
 PAGINAS_MAX = 30
+
+# Cada tienda tiene:
+#  - "urls": las categorías a revisar
+#  - "paginacion": "click" (hay que clickear un botón "siguiente"/"mostrar más")
+#                  o "url" (la paginación se hace agregando ?page=N a la URL)
+SITIOS = [
+    {
+        "tienda": "Tottus",
+        "paginacion": "click",
+        "urls": [
+            "https://www.tottus.com.pe/tottus-pe/lista/CATG48292/Tecnologia",
+            "https://www.tottus.com.pe/tottus-pe/lista/CATG48293/Electrohogar",
+            "https://www.tottus.com.pe/tottus-pe/lista/CATG48294/Dormitorio",
+            "https://www.tottus.com.pe/tottus-pe/lista/CATG48296/Muebles",
+            "https://www.tottus.com.pe/tottus-pe/lista/CATG48297/Jugueteria",
+            "https://www.tottus.com.pe/tottus-pe/lista/CATG48299/Bazar",
+        ],
+    },
+    {
+        "tienda": "Falabella",
+        "paginacion": "click",
+        "urls": [
+            "https://www.falabella.com.pe/falabella-pe/category/cat40793/Tecnologia",
+            "https://www.falabella.com.pe/falabella-pe/category/cat760702/Telefonia",
+            "https://www.falabella.com.pe/falabella-pe/category/cat40584/Electrohogar",
+        ],
+    },
+    {
+        "tienda": "Ripley",
+        "paginacion": "url",
+        "urls": [
+            "https://simple.ripley.com.pe/electrohogar",
+            "https://simple.ripley.com.pe/tecnologia",
+        ],
+    },
+    {
+        "tienda": "Metro",
+        "paginacion": "click",
+        "urls": [
+            "https://www.metro.pe/electrohogar",
+            "https://www.metro.pe/tecnologia",
+        ],
+    },
+    {
+        "tienda": "Plaza Vea",
+        "paginacion": "click",
+        "urls": [
+            "https://www.plazavea.com.pe/tecnologia",
+            "https://www.plazavea.com.pe/electrohogar",
+        ],
+    },
+    {
+        "tienda": "Coolbox",
+        "paginacion": "click",
+        "urls": [
+            "https://www.coolbox.pe/celulares-y-accesorios",
+            "https://www.coolbox.pe/audio",
+            "https://www.coolbox.pe/computo",
+            "https://www.coolbox.pe/gamer",
+            "https://www.coolbox.pe/hogar/smart-home",
+            "https://www.coolbox.pe/tv-y-video",
+        ],
+    },
+    {
+        "tienda": "Hiraoka",
+        "paginacion": "click",
+        "urls": [
+            "https://hiraoka.com.pe/audio-y-musica/audio",
+            "https://hiraoka.com.pe/computo-y-tablets/computadoras",
+            "https://hiraoka.com.pe/celulares-y-telefonia/celulares",
+            "https://hiraoka.com.pe/televisores/televisores",
+            "https://hiraoka.com.pe/electrodomesticos",
+            "https://hiraoka.com.pe/electrohogar/cocina-y-empotrables",
+            "https://hiraoka.com.pe/electrohogar/lavado-y-limpieza",
+            "https://hiraoka.com.pe/electrohogar/refrigeracion",
+        ],
+    },
+]
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -52,31 +118,13 @@ def enviar_telegram(mensaje):
         print(f"Error enviando a Telegram: {e}")
 
 
-def limpiar_precio(texto):
-    """Extrae un precio tipo 'S/ 3,299.90' de un texto que puede traer basura pegada
-    (ej: 'S/ 3,299UN\\n-33%'). Busca específicamente el patrón después de 'S/'
-    e ignora todo lo demás (%, 'UN', saltos de línea, etc.)."""
-    if not texto:
-        return None
-    match = re.search(r"S/\.?\s*([\d,]+(?:\.\d+)?)", texto)
-    if not match:
-        return None
-    numero = match.group(1).replace(",", "")
-    try:
-        valor = float(numero)
-        return valor if valor > 0 else None
-    except ValueError:
-        return None
-
-
 def ir_a_siguiente_pagina(page):
     """
-    Intenta hacer clic en el botón/link de 'siguiente página'. Tottus pagina
-    con JavaScript (no cambia la URL), así que hay que clickear el botón.
-    Se prueban varios selectores comunes porque no podemos inspeccionar
-    el sitio en vivo; si ninguno funciona, revisa el botón real (clic derecho
-    -> Inspeccionar sobre el número de página siguiente o la flecha ">") y
-    agrega ese selector a la lista de abajo.
+    Intenta hacer clic en el botón/link de 'siguiente página' o 'mostrar más'.
+    Varios sitios (Tottus, Falabella, Metro, Plaza Vea, Coolbox, Hiraoka) cargan
+    más productos con JavaScript en vez de cambiar la URL. Se prueban varios
+    selectores comunes; si el sitio real usa uno distinto, hay que inspeccionar
+    el botón (clic derecho -> Inspeccionar) y agregar ese selector a la lista.
     """
     candidatos = [
         "button[aria-label*='iguiente' i]",
@@ -84,6 +132,10 @@ def ir_a_siguiente_pagina(page):
         "[data-testid*='next' i]",
         "button:has-text('Siguiente')",
         "a:has-text('Siguiente')",
+        "button:has-text('Mostrar más')",
+        "button:has-text('Ver más')",
+        "a:has-text('Ver más')",
+        "a[rel='next']",
         "li.pagination-arrow-next a",
         "[class*='pagination'] [class*='next']",
         "[class*='paginator'] [class*='next']",
@@ -99,17 +151,16 @@ def ir_a_siguiente_pagina(page):
     return False
 
 
-def extraer_productos(page):
+def extraer_productos(page, dominio_base):
     """
-    Extrae productos de la página actual.
-
-    En vez de depender de clases CSS específicas (que Tottus puede cambiar
-    en cualquier momento), este método busca todos los enlaces <a> de la
-    página, se queda con los que tienen precio (contienen "S/"), y lee:
-      - el % de descuento que Tottus YA calcula y muestra (ej: "-22%")
-      - el primer precio (precio de oferta/actual)
-      - el último precio (precio de referencia/"antes", el más alto)
-    Esto es más robusto que adivinar selectores de precio "normal" vs "oferta".
+    Extrae productos de la página actual, sin depender de clases CSS específicas
+    (cada tienda usa las suyas y cambian con el tiempo). Busca todos los <a> con
+    precio ("S/ ...") y de ahí saca:
+      - todos los precios "S/ ..." que aparecen en el bloque (el más bajo = precio
+        de oferta, el más alto = precio de referencia/"antes")
+      - el % de descuento: si la tienda ya lo muestra (ej: "-22%") se usa ese
+        (el más alto, si hay varios niveles como en Ripley); si no lo muestra,
+        se calcula a partir de los dos precios (ej: Coolbox)
     """
     productos = []
     vistos_href = set()
@@ -125,22 +176,32 @@ def extraer_productos(page):
             if not texto or "S/" not in texto:
                 continue
 
-            # El % de descuento que Tottus ya muestra (ej: "-22%")
-            match_pct = re.search(r"-(\d{1,3})\s*%", texto)
-            if not match_pct:
-                continue
-            descuento = int(match_pct.group(1))
-            if not (0 < descuento <= 95):
-                continue
-
-            # Todos los precios "S/ ..." que aparecen en el bloque del producto
             precios_texto = re.findall(r"S/\.?\s*([\d,]+(?:\.\d+)?)", texto)
-            if len(precios_texto) < 2:
+            precios = []
+            for p in precios_texto:
+                try:
+                    valor = float(p.replace(",", ""))
+                    if valor > 0:
+                        precios.append(valor)
+                except ValueError:
+                    continue
+            if len(precios) < 2:
                 continue
 
-            precio_oferta = float(precios_texto[0].replace(",", ""))
-            precio_normal = float(precios_texto[-1].replace(",", ""))
+            precio_oferta = min(precios)
+            precio_normal = max(precios)
             if precio_normal <= precio_oferta:
+                continue
+
+            # % que la tienda ya calcula y muestra (puede haber más de uno,
+            # ej: Ripley muestra un descuento general y uno extra con tarjeta)
+            badges = re.findall(r"-(\d{1,3})\s*%", texto)
+            if badges:
+                descuento = max(int(b) for b in badges)
+            else:
+                descuento = round((1 - precio_oferta / precio_normal) * 100)
+
+            if not (0 < descuento <= 95):
                 continue
 
             # El nombre es el texto antes de que empiece la info de precio/envío
@@ -151,10 +212,11 @@ def extraer_productos(page):
                     l.startswith("S/")
                     or l.startswith("-")
                     or l.endswith("%")
-                    or "Por TOTTUS" in l
+                    or "Por " in l
                     or "Envío" in l
+                    or "Recíbelo" in l
                     or l.lower() == "unidad"
-                    or l == "Patrocinado"
+                    or l in ("Patrocinado", "Vendedor destacado", "Cupón: SKYPERU")
                 ):
                     break
                 nombre_partes.append(l)
@@ -162,7 +224,7 @@ def extraer_productos(page):
 
             link = href
             if link.startswith("/"):
-                link = "https://www.tottus.com.pe" + link
+                link = dominio_base + link
 
             vistos_href.add(href)
             productos.append(
@@ -181,7 +243,67 @@ def extraer_productos(page):
     return productos
 
 
-def revisar_tottus():
+def revisar_categoria(page, base_url, dominio_base, tipo_paginacion):
+    """Revisa todas las páginas de una categoría y devuelve los productos con descuento."""
+    encontrados = []
+    pagina = 1
+    nombres_vistos = set()
+
+    try:
+        page.goto(base_url, timeout=45000, wait_until="domcontentloaded")
+    except Exception as e:
+        print(f"  Error abriendo {base_url}: {e}")
+        return encontrados
+
+    while pagina <= PAGINAS_MAX:
+        if tipo_paginacion == "url" and pagina > 1:
+            separador = "&" if "?" in base_url else "?"
+            url_pagina = f"{base_url}{separador}page={pagina}"
+            try:
+                page.goto(url_pagina, timeout=45000, wait_until="domcontentloaded")
+            except Exception as e:
+                print(f"  Error abriendo página {pagina}: {e}")
+                break
+
+        page.wait_for_timeout(4000)  # deja que cargue el JS/productos
+        for _ in range(4):
+            page.mouse.wheel(0, 2000)
+            page.wait_for_timeout(1000)
+
+        try:
+            productos = extraer_productos(page, dominio_base)
+        except Exception as e:
+            print(f"  Error extrayendo productos (página {pagina}): {e}")
+            break
+
+        print(f"  Página {pagina}: {len(productos)} productos con descuento detectados")
+
+        nombres_pagina = {p["nombre"] for p in productos}
+        nuevos = nombres_pagina - nombres_vistos
+        if not productos or not nuevos:
+            print("  -> Sin productos nuevos, se asume fin de la categoría.")
+            break
+
+        nombres_vistos |= nombres_pagina
+        for prod in productos:
+            if prod["descuento"] >= DESCUENTO_MINIMO:
+                encontrados.append(prod)
+
+        if pagina >= PAGINAS_MAX:
+            break
+
+        if tipo_paginacion == "click":
+            avanzo = ir_a_siguiente_pagina(page)
+            if not avanzo:
+                print("  -> No se encontró botón de siguiente página, fin de la categoría.")
+                break
+
+        pagina += 1
+
+    return encontrados
+
+
+def revisar_todo():
     encontrados = []
 
     with sync_playwright() as p:
@@ -193,54 +315,21 @@ def revisar_tottus():
             )
         )
 
-        for base_url in URLS:
-            pagina = 1
-            nombres_vistos_en_categoria = set()
+        for sitio in SITIOS:
+            tienda = sitio["tienda"]
+            dominio_base = f"{urlparse(sitio['urls'][0]).scheme}://{urlparse(sitio['urls'][0]).netloc}"
 
-            print(f"Revisando: {base_url}")
-            try:
-                page.goto(base_url, timeout=45000, wait_until="domcontentloaded")
-            except Exception as e:
-                print(f"Error abriendo {base_url}: {e}")
-                continue
-
-            while pagina <= PAGINAS_MAX:
-                page.wait_for_timeout(4000)  # deja que cargue el JS/productos
-
-                # Scroll para forzar carga de productos (lazy loading)
-                for _ in range(4):
-                    page.mouse.wheel(0, 2000)
-                    page.wait_for_timeout(1000)
-
+            for url in sitio["urls"]:
+                print(f"[{tienda}] Revisando: {url}")
                 try:
-                    productos = extraer_productos(page)
+                    resultado = revisar_categoria(page, url, dominio_base, sitio["paginacion"])
                 except Exception as e:
-                    print(f"Error extrayendo productos (página {pagina}): {e}")
-                    break
+                    print(f"  Error inesperado en {url}: {e}")
+                    resultado = []
 
-                print(f"  Página {pagina}: {len(productos)} productos con descuento detectados")
-
-                nombres_pagina = {p["nombre"] for p in productos}
-                nuevos = nombres_pagina - nombres_vistos_en_categoria
-                if not productos or not nuevos:
-                    print("  -> Sin productos nuevos, se asume fin de la categoría.")
-                    break
-
-                nombres_vistos_en_categoria |= nombres_pagina
-
-                for prod in productos:
-                    if prod["descuento"] >= DESCUENTO_MINIMO:
-                        encontrados.append(prod)
-
-                if pagina >= PAGINAS_MAX:
-                    break
-
-                avanzo = ir_a_siguiente_pagina(page)
-                if not avanzo:
-                    print("  -> No se encontró botón de siguiente página, fin de la categoría.")
-                    break
-
-                pagina += 1
+                for prod in resultado:
+                    prod["tienda"] = tienda
+                encontrados.extend(resultado)
 
         browser.close()
 
@@ -248,7 +337,7 @@ def revisar_tottus():
 
 
 def main():
-    ofertas = revisar_tottus()
+    ofertas = revisar_todo()
 
     if not ofertas:
         print("No se encontraron nuevas ofertas >= descuento mínimo.")
@@ -258,7 +347,7 @@ def main():
         nombre_seguro = html.escape(oferta["nombre"])
         link = oferta["link"] or ""
         mensaje = (
-            f"🔥 <b>Oferta Tottus {oferta['descuento']}% OFF</b>\n"
+            f"🔥 <b>{oferta['tienda']}: {oferta['descuento']}% OFF</b>\n"
             f"{nombre_seguro}\n"
             f"Antes: S/ {oferta['precio_normal']:.2f}\n"
             f"Ahora: S/ {oferta['precio_oferta']:.2f}\n"
