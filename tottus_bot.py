@@ -68,15 +68,15 @@ def enviar_telegram(mensaje):
 
 
 def limpiar_precio(texto):
-    """Convierte 'S/ 199.90' -> 199.90. Devuelve None si el texto no es un precio
-    (por ejemplo si trae '%', que indica que es una etiqueta de descuento, no un precio)."""
+    """Extrae un precio tipo 'S/ 3,299.90' de un texto que puede traer basura pegada
+    (ej: 'S/ 3,299UN\\n-33%'). Busca específicamente el patrón después de 'S/'
+    e ignora todo lo demás (%, 'UN', saltos de línea, etc.)."""
     if not texto:
         return None
-    if "%" in texto:
+    match = re.search(r"S/\.?\s*([\d,]+(?:\.\d+)?)", texto)
+    if not match:
         return None
-    numero = re.sub(r"[^\d.]", "", texto.replace(",", ""))
-    if not numero:
-        return None
+    numero = match.group(1).replace(",", "")
     try:
         valor = float(numero)
         return valor if valor > 0 else None
