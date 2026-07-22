@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 # ------------------ CONFIGURACIÓN ------------------
 
 # % de descuento mínimo que quieres detectar
-DESCUENTO_MINIMO = 40
+DESCUENTO_MINIMO = 70
 
 # Categorías de Tottus a revisar cada vez que corre el bot (sin el número de página).
 # El bot recorre automáticamente todas las páginas de cada una (ver PAGINAS_MAX abajo).
@@ -17,6 +17,10 @@ DESCUENTO_MINIMO = 40
 URLS = [
     "https://www.tottus.com.pe/tottus-pe/lista/CATG48292/Tecnologia",
     "https://www.tottus.com.pe/tottus-pe/lista/CATG48293/Electrohogar",
+    "https://www.tottus.com.pe/tottus-pe/lista/CATG48294/Dormitorio",
+    "https://www.tottus.com.pe/tottus-pe/lista/CATG48296/Muebles",
+    "https://www.tottus.com.pe/tottus-pe/lista/CATG48297/Jugueteria",
+    "https://www.tottus.com.pe/tottus-pe/lista/CATG48299/Bazar",
 ]
 
 # Máximo de páginas a revisar por categoría (por si la paginación no se detiene sola)
