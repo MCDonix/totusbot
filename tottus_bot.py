@@ -1,7 +1,9 @@
 import html
+import json
 import os
 import re
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
@@ -10,7 +12,7 @@ from playwright.sync_api import sync_playwright
 # ------------------ CONFIGURACIÓN ------------------
 
 # % de descuento mínimo que quieres detectar
-DESCUENTO_MINIMO = 50
+DESCUENTO_MINIMO = 65
 
 # Máximo de páginas a revisar por categoría (bajado de 30 a 6: con tantas
 # tiendas y categorías, revisar 30 páginas de cada una hace que la corrida
@@ -88,6 +90,7 @@ SITIOS = [
     {
         "tienda": "Hiraoka",
         "paginacion": "click",
+        "espera_extra_ms": 6000,  # hiraoka puede tener una verificación anti-bot inicial
         "urls": [
             "https://hiraoka.com.pe/audio-y-musica/audio",
             "https://hiraoka.com.pe/computo-y-tablets/computadoras",
@@ -103,6 +106,29 @@ SITIOS = [
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+SEEN_FILE = Path("seen.json")
+
+
+def cargar_vistos():
+    if SEEN_FILE.exists():
+        try:
+            return set(json.loads(SEEN_FILE.read_text()))
+        except Exception:
+            return set()
+    return set()
+
+
+def guardar_vistos(vistos):
+    # Limitamos el tamaño del archivo para que no crezca infinito
+    lista = sorted(vistos)[-8000:]
+    SEEN_FILE.write_text(json.dumps(lista))
+
+
+def clave_oferta(oferta):
+    """Clave única por producto + tienda + % de descuento. Si el descuento
+    cambia (sube o baja), la clave cambia y el bot vuelve a avisar."""
+    return f"{oferta['tienda']}|{oferta['link']}|{oferta['descuento']}"
 
 
 def enviar_telegram(mensaje):
@@ -304,7 +330,7 @@ def extraer_productos(page, dominio_base):
     return productos
 
 
-def revisar_categoria(page, base_url, dominio_base, tipo_paginacion, tiempo_limite):
+def revisar_categoria(page, base_url, dominio_base, tipo_paginacion, tiempo_limite, espera_extra_ms=0):
     """Revisa todas las páginas de una categoría y devuelve los productos con descuento.
     Corta antes si se llega a `tiempo_limite` (timestamp de time.time())."""
     encontrados = []
@@ -313,6 +339,8 @@ def revisar_categoria(page, base_url, dominio_base, tipo_paginacion, tiempo_limi
 
     try:
         page.goto(base_url, timeout=45000, wait_until="domcontentloaded")
+        if espera_extra_ms:
+            page.wait_for_timeout(espera_extra_ms)
     except Exception as e:
         print(f"  Error abriendo {base_url}: {e}")
         return encontrados
@@ -375,12 +403,24 @@ def revisar_todo():
     tiempo_limite = tiempo_inicio + TIEMPO_MAXIMO_SEGUNDOS
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
         page = browser.new_page(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            )
+            ),
+            viewport={"width": 1366, "height": 900},
+            locale="es-PE",
+            extra_http_headers={"Accept-Language": "es-PE,es;q=0.9"},
+        )
+        # Oculta la señal más común que delata a un navegador automatizado
+        page.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
 
         cortar_todo = False
@@ -400,7 +440,14 @@ def revisar_todo():
 
                 print(f"[{tienda}] Revisando: {url}")
                 try:
-                    resultado = revisar_categoria(page, url, dominio_base, sitio["paginacion"], tiempo_limite)
+                    resultado = revisar_categoria(
+                        page,
+                        url,
+                        dominio_base,
+                        sitio["paginacion"],
+                        tiempo_limite,
+                        espera_extra_ms=sitio.get("espera_extra_ms", 0),
+                    )
                 except Exception as e:
                     print(f"  Error inesperado en {url}: {e}")
                     resultado = []
@@ -420,10 +467,22 @@ def main():
     ofertas = revisar_todo()
 
     if not ofertas:
-        print("No se encontraron nuevas ofertas >= descuento mínimo.")
+        print("No se encontraron ofertas >= descuento mínimo.")
         return
 
+    vistos = cargar_vistos()
+    ofertas_nuevas = []
     for oferta in ofertas:
+        clave = clave_oferta(oferta)
+        if clave not in vistos:
+            ofertas_nuevas.append(oferta)
+            vistos.add(clave)
+
+    if not ofertas_nuevas:
+        print("Todas las ofertas encontradas ya habían sido notificadas antes (mismo % de descuento).")
+        return
+
+    for oferta in ofertas_nuevas:
         nombre_seguro = html.escape(oferta["nombre"])
         link = oferta["link"] or ""
         mensaje = (
@@ -436,6 +495,8 @@ def main():
             mensaje += f'<a href="{html.escape(link)}">🔗 Ver producto</a>'
         enviar_telegram(mensaje)
         print(mensaje)
+
+    guardar_vistos(vistos)
 
 
 if __name__ == "__main__":
