@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -67,12 +68,18 @@ def enviar_telegram(mensaje):
 
 
 def limpiar_precio(texto):
-    """Convierte 'S/ 199.90' -> 199.90"""
+    """Convierte 'S/ 199.90' -> 199.90. Devuelve None si el texto no es un precio
+    (por ejemplo si trae '%', que indica que es una etiqueta de descuento, no un precio)."""
     if not texto:
         return None
+    if "%" in texto:
+        return None
     numero = re.sub(r"[^\d.]", "", texto.replace(",", ""))
+    if not numero:
+        return None
     try:
-        return float(numero)
+        valor = float(numero)
+        return valor if valor > 0 else None
     except ValueError:
         return None
 
@@ -114,15 +121,17 @@ def extraer_productos(page):
 
             if precio_normal and precio_oferta and precio_normal > precio_oferta:
                 descuento = round((1 - precio_oferta / precio_normal) * 100, 1)
-                productos.append(
-                    {
-                        "nombre": nombre,
-                        "link": link,
-                        "precio_normal": precio_normal,
-                        "precio_oferta": precio_oferta,
-                        "descuento": descuento,
-                    }
-                )
+                # Descarta resultados imposibles (indican que se leyó mal algún precio)
+                if 0 < descuento <= 95:
+                    productos.append(
+                        {
+                            "nombre": nombre,
+                            "link": link,
+                            "precio_normal": precio_normal,
+                            "precio_oferta": precio_oferta,
+                            "descuento": descuento,
+                        }
+                    )
         except Exception as e:
             print(f"Error procesando una tarjeta: {e}")
             continue
@@ -201,13 +210,16 @@ def main():
         return
 
     for oferta in ofertas:
+        nombre_seguro = html.escape(oferta["nombre"])
+        link = oferta["link"] or ""
         mensaje = (
             f"🔥 <b>Oferta Tottus {oferta['descuento']}% OFF</b>\n"
-            f"{oferta['nombre']}\n"
+            f"{nombre_seguro}\n"
             f"Antes: S/ {oferta['precio_normal']:.2f}\n"
             f"Ahora: S/ {oferta['precio_oferta']:.2f}\n"
-            f"{oferta['link']}"
         )
+        if link:
+            mensaje += f'<a href="{html.escape(link)}">🔗 Ver producto</a>'
         enviar_telegram(mensaje)
         print(mensaje)
 
