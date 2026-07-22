@@ -1,6 +1,7 @@
 import html
 import os
 import re
+import time
 from urllib.parse import urlparse
 
 import requests
@@ -11,8 +12,16 @@ from playwright.sync_api import sync_playwright
 # % de descuento mínimo que quieres detectar
 DESCUENTO_MINIMO = 50
 
-# Máximo de páginas a revisar por categoría (por si la paginación no se detiene sola)
-PAGINAS_MAX = 30
+# Máximo de páginas a revisar por categoría (bajado de 30 a 6: con tantas
+# tiendas y categorías, revisar 30 páginas de cada una hace que la corrida
+# completa tarde demasiado y no alcance a terminar antes de la próxima)
+PAGINAS_MAX = 6
+
+# Tiempo máximo total (en segundos) para toda la corrida. Si se llega a este
+# límite, el bot corta ahí mismo y envía lo que ya encontró, en vez de seguir
+# sin parar. 600 = 10 minutos, dejando margen antes de la próxima corrida
+# (que es cada 15 minutos).
+TIEMPO_MAXIMO_SEGUNDOS = 600
 
 # Cada tienda tiene:
 #  - "urls": las categorías a revisar
@@ -295,8 +304,9 @@ def extraer_productos(page, dominio_base):
     return productos
 
 
-def revisar_categoria(page, base_url, dominio_base, tipo_paginacion):
-    """Revisa todas las páginas de una categoría y devuelve los productos con descuento."""
+def revisar_categoria(page, base_url, dominio_base, tipo_paginacion, tiempo_limite):
+    """Revisa todas las páginas de una categoría y devuelve los productos con descuento.
+    Corta antes si se llega a `tiempo_limite` (timestamp de time.time())."""
     encontrados = []
     pagina = 1
     nombres_vistos = set()
@@ -308,6 +318,10 @@ def revisar_categoria(page, base_url, dominio_base, tipo_paginacion):
         return encontrados
 
     while pagina <= PAGINAS_MAX:
+        if time.time() > tiempo_limite:
+            print("  -> Tiempo máximo alcanzado, se corta esta categoría.")
+            break
+
         if tipo_paginacion == "url" and pagina > 1:
             separador = "&" if "?" in base_url else "?"
             url_pagina = f"{base_url}{separador}page={pagina}"
@@ -317,10 +331,10 @@ def revisar_categoria(page, base_url, dominio_base, tipo_paginacion):
                 print(f"  Error abriendo página {pagina}: {e}")
                 break
 
-        page.wait_for_timeout(4000)  # deja que cargue el JS/productos
-        for _ in range(4):
+        page.wait_for_timeout(2500)  # deja que cargue el JS/productos
+        for _ in range(2):
             page.mouse.wheel(0, 2000)
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(700)
 
         try:
             productos = extraer_productos(page, dominio_base)
@@ -357,6 +371,8 @@ def revisar_categoria(page, base_url, dominio_base, tipo_paginacion):
 
 def revisar_todo():
     encontrados = []
+    tiempo_inicio = time.time()
+    tiempo_limite = tiempo_inicio + TIEMPO_MAXIMO_SEGUNDOS
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -367,14 +383,24 @@ def revisar_todo():
             )
         )
 
+        cortar_todo = False
         for sitio in SITIOS:
+            if cortar_todo:
+                break
+
             tienda = sitio["tienda"]
             dominio_base = f"{urlparse(sitio['urls'][0]).scheme}://{urlparse(sitio['urls'][0]).netloc}"
 
             for url in sitio["urls"]:
+                if time.time() > tiempo_limite:
+                    print(f"Tiempo máximo alcanzado ({TIEMPO_MAXIMO_SEGUNDOS}s). "
+                          f"Se detiene la corrida; quedaron categorías sin revisar.")
+                    cortar_todo = True
+                    break
+
                 print(f"[{tienda}] Revisando: {url}")
                 try:
-                    resultado = revisar_categoria(page, url, dominio_base, sitio["paginacion"])
+                    resultado = revisar_categoria(page, url, dominio_base, sitio["paginacion"], tiempo_limite)
                 except Exception as e:
                     print(f"  Error inesperado en {url}: {e}")
                     resultado = []
@@ -385,6 +411,8 @@ def revisar_todo():
 
         browser.close()
 
+    minutos = round((time.time() - tiempo_inicio) / 60, 1)
+    print(f"Corrida terminada en {minutos} minutos.")
     return encontrados
 
 
