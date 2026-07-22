@@ -30,11 +30,3 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python tottus_bot.py
-
-      - name: Guardar productos ya notificados
-        run: |
-          git config user.name "tottus-bot"
-          git config user.email "actions@github.com"
-          git add seen.json || true
-          git diff --staged --quiet || git commit -m "Actualiza ofertas vistas [skip ci]"
-          git push || true
