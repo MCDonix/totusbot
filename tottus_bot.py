@@ -1,8 +1,6 @@
 import html
-import json
 import os
 import re
-from pathlib import Path
 
 import requests
 from playwright.sync_api import sync_playwright
@@ -24,25 +22,8 @@ URLS = [
 # Máximo de páginas a revisar por categoría (por si la paginación no se detiene sola)
 PAGINAS_MAX = 30
 
-SEEN_FILE = Path("seen.json")
-
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-
-
-def cargar_vistos():
-    if SEEN_FILE.exists():
-        try:
-            return set(json.loads(SEEN_FILE.read_text()))
-        except Exception:
-            return set()
-    return set()
-
-
-def guardar_vistos(vistos):
-    # Limitamos el tamaño del archivo para que no crezca infinito
-    lista = sorted(vistos)[-5000:]
-    SEEN_FILE.write_text(json.dumps(lista))
 
 
 def enviar_telegram(mensaje):
@@ -84,63 +65,119 @@ def limpiar_precio(texto):
         return None
 
 
+def ir_a_siguiente_pagina(page):
+    """
+    Intenta hacer clic en el botón/link de 'siguiente página'. Tottus pagina
+    con JavaScript (no cambia la URL), así que hay que clickear el botón.
+    Se prueban varios selectores comunes porque no podemos inspeccionar
+    el sitio en vivo; si ninguno funciona, revisa el botón real (clic derecho
+    -> Inspeccionar sobre el número de página siguiente o la flecha ">") y
+    agrega ese selector a la lista de abajo.
+    """
+    candidatos = [
+        "button[aria-label*='iguiente' i]",
+        "a[aria-label*='iguiente' i]",
+        "[data-testid*='next' i]",
+        "button:has-text('Siguiente')",
+        "a:has-text('Siguiente')",
+        "li.pagination-arrow-next a",
+        "[class*='pagination'] [class*='next']",
+        "[class*='paginator'] [class*='next']",
+    ]
+    for sel in candidatos:
+        try:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                el.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def extraer_productos(page):
     """
     Extrae productos de la página actual.
 
-    IMPORTANTE: los selectores CSS de Tottus pueden cambiar con el tiempo.
-    Si el script deja de encontrar productos, inspecciona (botón derecho ->
-    Inspeccionar) una tarjeta de producto en tottus.falabella.com.pe y
-    actualiza los selectores de abajo.
+    En vez de depender de clases CSS específicas (que Tottus puede cambiar
+    en cualquier momento), este método busca todos los enlaces <a> de la
+    página, se queda con los que tienen precio (contienen "S/"), y lee:
+      - el % de descuento que Tottus YA calcula y muestra (ej: "-22%")
+      - el primer precio (precio de oferta/actual)
+      - el último precio (precio de referencia/"antes", el más alto)
+    Esto es más robusto que adivinar selectores de precio "normal" vs "oferta".
     """
     productos = []
-    tarjetas = page.query_selector_all("[data-testid='pod']")
-    if not tarjetas:
-        tarjetas = page.query_selector_all(".pod")
+    vistos_href = set()
+    enlaces = page.query_selector_all("a")
 
-    for tarjeta in tarjetas:
+    for a in enlaces:
         try:
-            nombre_el = tarjeta.query_selector(
-                "[data-testid='pod-displaySubTitle'], .pod-subTitle, b.title-product"
-            )
-            link_el = tarjeta.query_selector("a")
-            precio_normal_el = tarjeta.query_selector(
-                "[data-normal-price], .normal-price, .prices-0, .lowest-price"
-            )
-            precio_oferta_el = tarjeta.query_selector(
-                "[data-internet-price], .internet-price, .prices-1, .cmr-price, .best-price"
-            )
+            href = a.get_attribute("href")
+            if not href or href in vistos_href:
+                continue
 
-            nombre = nombre_el.inner_text().strip() if nombre_el else "Producto sin nombre"
-            link = link_el.get_attribute("href") if link_el else ""
-            if link and link.startswith("/"):
+            texto = a.inner_text()
+            if not texto or "S/" not in texto:
+                continue
+
+            # El % de descuento que Tottus ya muestra (ej: "-22%")
+            match_pct = re.search(r"-(\d{1,3})\s*%", texto)
+            if not match_pct:
+                continue
+            descuento = int(match_pct.group(1))
+            if not (0 < descuento <= 95):
+                continue
+
+            # Todos los precios "S/ ..." que aparecen en el bloque del producto
+            precios_texto = re.findall(r"S/\.?\s*([\d,]+(?:\.\d+)?)", texto)
+            if len(precios_texto) < 2:
+                continue
+
+            precio_oferta = float(precios_texto[0].replace(",", ""))
+            precio_normal = float(precios_texto[-1].replace(",", ""))
+            if precio_normal <= precio_oferta:
+                continue
+
+            # El nombre es el texto antes de que empiece la info de precio/envío
+            lineas = [l.strip() for l in texto.split("\n") if l.strip()]
+            nombre_partes = []
+            for l in lineas:
+                if (
+                    l.startswith("S/")
+                    or l.startswith("-")
+                    or l.endswith("%")
+                    or "Por TOTTUS" in l
+                    or "Envío" in l
+                    or l.lower() == "unidad"
+                    or l == "Patrocinado"
+                ):
+                    break
+                nombre_partes.append(l)
+            nombre = " ".join(nombre_partes)[:150] if nombre_partes else "Producto sin nombre"
+
+            link = href
+            if link.startswith("/"):
                 link = "https://www.tottus.com.pe" + link
 
-            precio_normal = limpiar_precio(precio_normal_el.inner_text()) if precio_normal_el else None
-            precio_oferta = limpiar_precio(precio_oferta_el.inner_text()) if precio_oferta_el else None
-
-            if precio_normal and precio_oferta and precio_normal > precio_oferta:
-                descuento = round((1 - precio_oferta / precio_normal) * 100, 1)
-                # Descarta resultados imposibles (indican que se leyó mal algún precio)
-                if 0 < descuento <= 95:
-                    productos.append(
-                        {
-                            "nombre": nombre,
-                            "link": link,
-                            "precio_normal": precio_normal,
-                            "precio_oferta": precio_oferta,
-                            "descuento": descuento,
-                        }
-                    )
+            vistos_href.add(href)
+            productos.append(
+                {
+                    "nombre": nombre,
+                    "link": link,
+                    "precio_normal": precio_normal,
+                    "precio_oferta": precio_oferta,
+                    "descuento": descuento,
+                }
+            )
         except Exception as e:
-            print(f"Error procesando una tarjeta: {e}")
+            print(f"Error procesando un enlace: {e}")
             continue
 
     return productos
 
 
 def revisar_tottus():
-    vistos = cargar_vistos()
     encontrados = []
 
     with sync_playwright() as p:
@@ -153,52 +190,56 @@ def revisar_tottus():
         )
 
         for base_url in URLS:
-            separador = "&" if "?" in base_url else "?"
             pagina = 1
             nombres_vistos_en_categoria = set()
 
+            print(f"Revisando: {base_url}")
+            try:
+                page.goto(base_url, timeout=45000, wait_until="domcontentloaded")
+            except Exception as e:
+                print(f"Error abriendo {base_url}: {e}")
+                continue
+
             while pagina <= PAGINAS_MAX:
-                # Página 1 es la URL tal cual; desde la 2 se agrega ?page=N
-                url = base_url if pagina == 1 else f"{base_url}{separador}page={pagina}"
-                print(f"Revisando: {url}")
+                page.wait_for_timeout(4000)  # deja que cargue el JS/productos
+
+                # Scroll para forzar carga de productos (lazy loading)
+                for _ in range(4):
+                    page.mouse.wheel(0, 2000)
+                    page.wait_for_timeout(1000)
 
                 try:
-                    page.goto(url, timeout=45000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(4000)  # deja que cargue el JS/productos
-
-                    # Scroll para forzar carga de productos (lazy loading)
-                    for _ in range(4):
-                        page.mouse.wheel(0, 2000)
-                        page.wait_for_timeout(1000)
-
                     productos = extraer_productos(page)
-                    print(f"  -> {len(productos)} productos con descuento detectados")
-
-                    # Si la página no trajo productos nuevos, asumimos que ya
-                    # no hay más páginas (se repitió el contenido o llegó al final)
-                    nombres_pagina = {p["nombre"] for p in productos}
-                    if not productos or nombres_pagina.issubset(nombres_vistos_en_categoria):
-                        print("  -> Sin productos nuevos, se asume fin de la paginación.")
-                        break
-
-                    nombres_vistos_en_categoria |= nombres_pagina
-
-                    for prod in productos:
-                        if prod["descuento"] >= DESCUENTO_MINIMO:
-                            clave = f"{prod['nombre']}|{prod['precio_oferta']}"
-                            if clave not in vistos:
-                                encontrados.append(prod)
-                                vistos.add(clave)
-
-                    pagina += 1
-
                 except Exception as e:
-                    print(f"Error revisando {url}: {e}")
+                    print(f"Error extrayendo productos (página {pagina}): {e}")
                     break
+
+                print(f"  Página {pagina}: {len(productos)} productos con descuento detectados")
+
+                nombres_pagina = {p["nombre"] for p in productos}
+                nuevos = nombres_pagina - nombres_vistos_en_categoria
+                if not productos or not nuevos:
+                    print("  -> Sin productos nuevos, se asume fin de la categoría.")
+                    break
+
+                nombres_vistos_en_categoria |= nombres_pagina
+
+                for prod in productos:
+                    if prod["descuento"] >= DESCUENTO_MINIMO:
+                        encontrados.append(prod)
+
+                if pagina >= PAGINAS_MAX:
+                    break
+
+                avanzo = ir_a_siguiente_pagina(page)
+                if not avanzo:
+                    print("  -> No se encontró botón de siguiente página, fin de la categoría.")
+                    break
+
+                pagina += 1
 
         browser.close()
 
-    guardar_vistos(vistos)
     return encontrados
 
 
