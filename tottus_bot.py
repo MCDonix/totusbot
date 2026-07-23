@@ -12,7 +12,7 @@ from playwright.sync_api import sync_playwright
 # ------------------ CONFIGURACIÓN ------------------
 
 # % de descuento mínimo que quieres detectar
-DESCUENTO_MINIMO = 65
+DESCUENTO_MINIMO = 60
 
 # Máximo de páginas a revisar por categoría (bajado de 30 a 6: con tantas
 # tiendas y categorías, revisar 30 páginas de cada una hace que la corrida
@@ -126,9 +126,10 @@ def guardar_vistos(vistos):
 
 
 def clave_oferta(oferta):
-    """Clave única por producto + tienda + % de descuento. Si el descuento
-    cambia (sube o baja), la clave cambia y el bot vuelve a avisar."""
-    return f"{oferta['tienda']}|{oferta['link']}|{oferta['descuento']}"
+    """Clave única por producto + tienda + % de descuento + precio de oferta.
+    Si cualquiera de los dos cambia (el % o el precio), la clave cambia y el
+    bot vuelve a avisar. Si todo sigue igual, no se repite."""
+    return f"{oferta['tienda']}|{oferta['link']}|{oferta['descuento']}|{oferta['precio_oferta']}"
 
 
 def enviar_telegram(mensaje):
