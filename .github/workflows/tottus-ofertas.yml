@@ -1,12 +1,12 @@
+name: Tottus Ofertas Bot
+
 on:
-  push:
-    branches:
-      - master
-
   schedule:
+    # Corre cada 15 minutos. GitHub puede retrasar un poco la ejecución
+    # en horas de mucha carga, pero en la práctica corre casi siempre a tiempo.
     - cron: "*/15 * * * *"
+  workflow_dispatch: {}  # te permite ejecutarlo manualmente desde la pestaña Actions
 
-  workflow_dispatch:
 permissions:
   contents: write
 
@@ -30,3 +30,12 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python tottus_bot.py
+
+      - name: Guardar productos ya notificados
+        run: |
+          git config user.name "tottus-bot"
+          git config user.email "actions@github.com"
+          git add seen.json || true
+          git diff --staged --quiet || git commit -m "Actualiza ofertas vistas [skip ci]"
+          git pull --rebase || true
+          git push || true
