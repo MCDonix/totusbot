@@ -14,10 +14,8 @@ from playwright.sync_api import sync_playwright
 # % de descuento mínimo que quieres detectar
 DESCUENTO_MINIMO = 60
 
-# Máximo de páginas a revisar por categoría (bajado de 30 a 6: con tantas
-# tiendas y categorías, revisar 30 páginas de cada una hace que la corrida
-# completa tarde demasiado y no alcance a terminar antes de la próxima)
-PAGINAS_MAX = 6
+# Máximo de páginas a revisar por categoría
+PAGINAS_MAX = 10
 
 # Tiempo máximo total (en segundos) para toda la corrida. Si se llega a este
 # límite, el bot corta ahí mismo y envía lo que ya encontró, en vez de seguir
@@ -225,6 +223,29 @@ def obtener_bloques_producto(page):
     )
 
 
+def es_link_de_producto(link, dominio_base):
+    """
+    Valida que el link sea realmente de un producto y no un enlace vacío,
+    de categoría, o de un filtro capturado por error.
+    """
+    if not link or not link.startswith("http"):
+        return False
+    if link in ("#", "javascript:void(0)"):
+        return False
+
+    ruta = link[len(dominio_base):] if link.startswith(dominio_base) else urlparse(link).path
+    if len(ruta.strip("/")) < 5:
+        return False
+
+    # Falabella, Tottus y Sodimac comparten la misma plataforma: sus URLs de
+    # producto reales siempre incluyen "/product/" en la ruta. Si no lo tiene,
+    # es casi seguro que se capturó un link de categoría/filtro por error.
+    if any(marca in dominio_base for marca in ("falabella", "tottus", "sodimac")):
+        return "/product/" in link
+
+    return True
+
+
 def extraer_productos(page, dominio_base):
     """
     Extrae productos de la página actual, sin depender de clases CSS específicas
@@ -314,6 +335,9 @@ def extraer_productos(page, dominio_base):
             link = href
             if link.startswith("/"):
                 link = dominio_base + link
+
+            if not es_link_de_producto(link, dominio_base):
+                continue
 
             productos.append(
                 {
