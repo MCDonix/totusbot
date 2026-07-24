@@ -123,11 +123,21 @@ def guardar_vistos(vistos):
     SEEN_FILE.write_text(json.dumps(lista))
 
 
+def normalizar_link(link):
+    """Quita parámetros de query (?...) y ancla (#...) del link. Algunas tiendas
+    (ej: Falabella) agregan parámetros de tracking/posición que cambian en cada
+    carga aunque sea el mismo producto, lo que rompía la detección de duplicados."""
+    if not link:
+        return link
+    return link.split("?")[0].split("#")[0]
+
+
 def clave_oferta(oferta):
     """Clave única por producto + tienda + % de descuento + precio de oferta.
     Si cualquiera de los dos cambia (el % o el precio), la clave cambia y el
     bot vuelve a avisar. Si todo sigue igual, no se repite."""
-    return f"{oferta['tienda']}|{oferta['link']}|{oferta['descuento']}|{oferta['precio_oferta']}"
+    link_normalizado = normalizar_link(oferta["link"])
+    return f"{oferta['tienda']}|{link_normalizado}|{oferta['descuento']}|{oferta['precio_oferta']}"
 
 
 def enviar_telegram(mensaje):
